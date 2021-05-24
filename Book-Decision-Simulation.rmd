@@ -1,0 +1,290 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Packages and Data
+
+```{r}
+library(readr)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+theme_set(theme_bw())
+
+options(stringsAsFactors=FALSE)
+```
+
+
+```{r}
+library(rcrimeanalysis)
+data(crimes)
+crimes
+```
+
+```{r}
+crimes_df <- data.frame(crimes)
+head(crimes_df)
+```
+
+```{r}
+table(crimes_df$primary_type) %>% 
+        as.data.frame() %>% 
+        arrange(desc(Freq))
+```
+
+
+```{r}
+str(crimes_df)
+```
+
+
+```{r}
+crimes_bar <- crimes_df %>% count(primary_type) %>% mutate(Percentage = round(n/nrow(crimes)*100,2)) %>% filter(rank(desc(Percentage)) <= 10)
+ggplot(crimes_bar, aes(x = reorder(primary_type,-Percentage), y = Percentage)) +
+  geom_bar(stat = "identity") +
+  labs(title= "10 most common crimes by % of crimes citywide, Chicago ", x="Type of crime", y="Proportion of crimes reported citywide") +
+  theme(axis.text.x=element_text(angle=45, hjust=1)) -> top10_crimes
+
+top10_crimes
+#ggsave("~/Downloads/top10_crimes.png", plot = top10_crimes)
+```
+
+
+$ primary_type        : chr  "WEAPONS VIOLATION" "THEFT" "OTHER OFFENSE" "BATTERY" ...
+ $ description         : chr  "UNLAWFUL POSS OF HANDGUN" "$500 AND UNDER" "FALSE/STOLEN/ALTERED TRP" "SIMPLE" ...
+ $ location_description: chr  "OTHER" "STREET" "STREET" "OTHER" ...
+ $ arrest              : logi  TRUE FALSE TRUE TRUE FALSE FALSE ...
+ $ domestic            : logi  FALSE FALSE FALSE FALSE FALSE FALSE ...
+ $ beat                : num  832 1923 414 2031 235 ...
+ $ district            : num  8 19 4 20 2 2 6 19 11 3 ...
+ $ ward                : num  15 46 7 40 5 5 17 44 28 6 ...
+ $ community_area      : num  66 6 46 4 41 41 71 6 26 69 ...
+ $ fbi_code            : chr  "15" "6" "26" "08B" ...
+ $ x_coordinate        : num  1161120 1170260 1192487 1156348 1187594 ...
+ $ y_coordinate        : num  1858829 1924854 1853027 1932071 1868671 ...
+ $ year                : num  2017 2019 2019 2017 2017 ...
+ $ updated_on          : chr  "2/10/2018 15:50" "6/30/2019 15:56" "7/1/2019 16:17" "2/10/2018 15:50" ...
+ $ latitude            : num  41.8 41.9 41.8 42 41.8 ...
+ $ longitude           : num  -87.7 -87.6 -87.6 -87.7 -87.6 ...
+
+```{r}
+sel_col = c('arrest', 'latitude', 'longitude', 'year', 'fbi_code', 'domestic', 'district', 'ward')
+
+crimes_input <- data.frame(crimes_df[sel_col], stringsAsFactors = F) #, 'year'
+
+#factors
+fac_col = sel_col[!sel_col %in% c('latitude', 'longitude', 'year')]
+
+crimes_input[,fac_col] <- lapply(crimes_input[,fac_col], factor) 
+```
+
+
+```{r}
+addNoAnswer <- function(x){
+  if(is.factor(x)) return(factor(x, levels=c(levels(x), "Null")))
+  return(x)
+}
+
+#Not for the arrest column
+
+crimes_input[,fac_col[-1]] <- lapply(crimes_input[,fac_col[-1]], addNoAnswer) 
+```
+
+
+
+```{r}
+#Lose two
+crimes_input <- na.omit(crimes_input)
+
+str(crimes_input)
+```
+
+
+
+## Models
+
+```{r}
+library(rpart)
+library(rpart.plot)
+crimes_tree <- rpart(arrest ~ ., data = crimes_input, method = 'class')
+#crimes_tree
+```
+
+
+```{r}
+predicted_arrest_dt <- predict(crimes_tree, crimes_input, type = 'class')
+```
+
+```{r}
+prediction_table <- table(predicted_arrest_dt, crimes_input$arrest)
+prediction_table 
+```
+
+```{r}
+sum(predicted_arrest_dt == crimes_input$arrest) / nrow(crimes_input)
+```
+
+
+```{r}
+library(nnet)
+
+crimes_nn <- nnet(arrest ~ ., data = crimes_input, size = 10, maxit = 10000, trace = FALSE, MaxNWts = 5500)
+```
+
+```{r}
+predicted_arrest_nn <- predict(crimes_nn, crimes_input[-1], type = 'class')
+```
+
+
+```{r}
+prediction_table <- table(predicted_arrest_nn, crimes_input$arrest)
+prediction_table 
+```
+
+```{r}
+sum(predicted_arrest_nn == crimes_input$arrest) / nrow(crimes_input)
+```
+
+
+```{r}
+library("randomForest")
+
+crimes_rf <- randomForest(arrest ~ ., data = crimes_input, ntree=1000, keep.forest=FALSE,
+                          importance=TRUE)
+
+#varImpPlot(crimes_rf)
+```
+
+
+
+predicted_arrest_rf <- predict(crimes_rf, newdata = crimes_input[-1])
+prediction_table <- table(predicted_arrest_rf, crimes_input$arrest)
+prediction_table 
+sum(predicted_arrest_rf == crimes_input$arrest) / nrow(crimes_input)
+
+
+## Feature Importance
+
+```{r}
+# make dataframe from importance() output
+feat_imp_df <- importance(crimes_rf) %>% 
+    data.frame() %>% 
+    mutate(feature = row.names(.)) 
+
+# plot dataframe
+ggplot(feat_imp_df, aes(x = reorder(feature, MeanDecreaseGini), 
+                         y = MeanDecreaseGini)) +
+    geom_bar(stat='identity') +
+    coord_flip() +
+    theme_classic() +
+    labs(
+      x     = "Feature",
+      y     = "Importance",
+      title = "Feature Importance: <Model>"
+    )
+```
+
+
+## Decision Boundary
+
+```{r}
+x_min <- min(crimes_input$latitude) - 0.1
+x_max <- max(crimes_input$latitude) + 0.1
+y_min <- min(crimes_input$longitude) - 0.1
+y_max <- max(crimes_input$longitude) + 0.1
+hs <- 0.01
+grid <- as.data.frame(expand.grid(seq(x_min, x_max, by = hs), seq(y_min, y_max, by =hs)))
+names(grid) <- c('latitude','longitude')
+```
+
+```{r}
+str(grid)
+```
+
+
+```{r}
+
+grid$year <- 0
+grid$fbi_code <- "Null"
+grid$domestic <- "Null"
+grid$district <- "Null"
+grid$ward <- "Null"
+
+str(grid)
+```
+
+```{r}
+grid <- anti_join(grid, crimes_input, by=c('latitude', 'longitude'))
+grid <- rbind(grid, crimes_input[-1])
+str(grid)
+```
+
+
+```{r}
+grid_predict <- predict(crimes_nn, newdata = grid, type = 'class')
+```
+
+```{r}
+#theme_set(theme_bw())
+p <- ggplot()+ geom_tile(aes(x = grid[,1],y = grid[,2],fill=as.character(grid_predict)), alpha = 0.5, show.legend = F) + 
+  geom_point(data = crimes_input, aes(x=latitude, y=longitude, color = as.character(predicted_arrest_dt)), size = 2) +
+  theme_bw(base_size = 15) +
+  ggtitle('<Model> Boundary') +
+  coord_fixed(ratio = 0.8) 
+```
+
+
+```{r}
+p + scale_colour_grey(start = 0.6, end = 0.9) + theme_bw() + 
+  theme(axis.ticks=element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        axis.text=element_blank(), axis.title=element_blank(), legend.position = 'none')  
+```
+
+## Rcrimeanalysis package
+
+https://github.com/JSSpaulding/rcrimeanalysis
+
+```{r}
+nr_data <- head(crimes, n = 5000) #truncate dataset for near repeat analysis
+out <- near_repeat_analysis(data = nr_data, tz = "America/Chicago", epsg = "32616")
+path <- paste0("~/Downloads/series-png/") #path for iGraph networks out
+name <- 1
+# Save Image of Each igraph Network to Netpath Directory
+library(igraph)
+for(i in out){
+    png(file = paste(path, "/series", name, ".png", sep = ""))
+    plot(i, layout = layout_with_lgl, edge.color="orange",
+    vertex.color = "orange", vertex.frame.color = "#ffffff",
+    vertex.label.color = "black")
+    dev.off()
+    name <- name + 1
+}
+```
+
+```{r}
+int_out <- kde_int_comp(crimes, start1="1/1/2017", end1="3/1/2017",
+                                start2="1/1/2018", end2="3/1/2018")
+int_out
+```
+
+```{r}
+library(leaflet) #needed to install basemap providers
+library(leafsync) #creates plot of both maps
+crime_sample <- head(crimes, n = 1000)
+# Plot without Points
+p1 <- crime_sample %>% kde_map(pts = FALSE)
+# Plot with Incident Points
+p2 <- crime_sample %>% kde_map()
+leafsync::sync(p1,p2)
+```
+
+```{r}
+library(prophet)
+ts_forecast(crimes, start = c(2017, 1, 1))
+```
+
+```{r}
+
+```
+
